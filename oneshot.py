@@ -438,7 +438,8 @@ class Companion:
         self.bssid = bssid
         self.lastPwr = 0
         self.pin_attempts = 0
-        self.PIN_RESET_THRESHOLD = 375  # 设置重置阈值为375次
+        self.MAC_CHANGE_INTERVAL = 1800  # 30分钟 = 1800秒
+        self.last_mac_change_time = time.time()
         self.MAC_CHANGE_THRESHOLD = 150  # Change MAC every 150 PINs
         self.used_macs = set()  # Keep track of used MAC addresses
 
@@ -732,7 +733,7 @@ class Companion:
         """重新初始化wpa_supplicant和套接字资源"""
         # 清理现有资源
         self.cleanup()
-            # 重新初始化所有资源
+        # 重新初始化所有资源
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
             temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
@@ -743,9 +744,9 @@ class Companion:
         self.res_socket_file = f"{tempfile._get_default_tempdir()}/{next(tempfile._get_candidate_names())}"
         self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.retsock.bind(self.res_socket_file)
-    
-        # 重置计数器
+        # 重置计数器和计时器
         self.pin_attempts = 0
+        self.last_mac_change_time = current_time
         
 
 
@@ -753,7 +754,17 @@ class Companion:
                           pixieforce=False, store_pin_on_fail=False):
         
         self.pin_attempts += 1
-
+        current_time = time.time()
+        if current_time - self.last_mac_change_time >= self.MAC_CHANGE_INTERVAL:
+            try:
+                print('[*] 30 minutes passed - changing MAC address and reinitializing...')
+                self.change_mac_address()
+                # 重新初始化wpa_supplicant
+                self.reinitialize()
+            except subprocess.CalledProcessError as e:
+                print(f'[!] Failed to change MAC address: {e}')
+                return False
+        
         # Check if we need to change MAC address
         if self.pin_attempts % self.MAC_CHANGE_THRESHOLD == 0:
             try:
@@ -764,12 +775,6 @@ class Companion:
                 print(f'[!] Failed to change MAC address: {e}')
                 return False
     
-    
-    
-        # 检查是否需要重置
-        if self.pin_attempts >= self.PIN_RESET_THRESHOLD:
-            print('[*] Reinitializing wpa_supplicant after {} attempts...'.format(self.PIN_RESET_THRESHOLD))
-            self.reinitialize()
         
         
         if not pin:

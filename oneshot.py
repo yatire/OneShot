@@ -507,6 +507,29 @@ class Companion:
         return '[!] Something went wrong — check out debug log'
 
     def __handle_wpas(self, pixiemode=False, pbc_mode=False, verbose=None, bssid=""):
+        self.pin_attempts += 1
+        current_time = time.time()
+        if current_time - self.last_mac_change_time >= self.MAC_CHANGE_INTERVAL:
+            try:
+                print('[*] Time trigger - changing MAC address and reinitializing...')
+                self.change_mac_address()
+                # 重新初始化wpa_supplicant
+                self.reinitialize()
+            except subprocess.CalledProcessError as e:
+                print(f'[!] Failed to change MAC address: {e}')
+                return False
+        
+        # Check if we need to change MAC address
+        if self.pin_attempts >= self.MAC_CHANGE_THRESHOLD:
+            try:
+                print('[*] Number trigger - changing MAC address and reinitializing...')
+                self.change_mac_address()
+                # Reinitialize wpa_supplicant after MAC change
+                self.reinitialize()
+            except subprocess.CalledProcessError as e:
+                print(f'[!] Failed to change MAC address: {e}')
+                return False
+
         if not verbose:
             verbose = self.print_debug
         line = self.wpas.stdout.readline()
@@ -753,32 +776,6 @@ class Companion:
 
     def single_connection(self, bssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
                           pixieforce=False, store_pin_on_fail=False):
-        
-        self.pin_attempts += 1
-        current_time = time.time()
-        if current_time - self.last_mac_change_time >= self.MAC_CHANGE_INTERVAL:
-            try:
-                print('[*] Time trigger - changing MAC address and reinitializing...')
-                self.change_mac_address()
-                # 重新初始化wpa_supplicant
-                self.reinitialize()
-            except subprocess.CalledProcessError as e:
-                print(f'[!] Failed to change MAC address: {e}')
-                return False
-        
-        # Check if we need to change MAC address
-        if self.pin_attempts >= self.MAC_CHANGE_THRESHOLD:
-            try:
-                print('[*] Number trigger - changing MAC address and reinitializing...')
-                self.change_mac_address()
-                # Reinitialize wpa_supplicant after MAC change
-                self.reinitialize()
-            except subprocess.CalledProcessError as e:
-                print(f'[!] Failed to change MAC address: {e}')
-                return False
-    
-        
-        
         if not pin:
             if pixiemode:
                 try:

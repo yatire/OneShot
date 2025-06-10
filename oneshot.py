@@ -507,7 +507,6 @@ class Companion:
         return '[!] Something went wrong — check out debug log'
 
     def __handle_wpas(self, pixiemode=False, pbc_mode=False, verbose=None, bssid=""):
-        self.pin_attempts += 1
         current_time = time.time()
         if current_time - self.last_mac_change_time >= self.MAC_CHANGE_INTERVAL:
             try:
@@ -776,6 +775,7 @@ class Companion:
 
     def single_connection(self, bssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
                           pixieforce=False, store_pin_on_fail=False):
+        self.pin_attempts += 1
         if not pin:
             if pixiemode:
                 try:

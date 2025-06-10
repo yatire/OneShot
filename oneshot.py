@@ -438,9 +438,9 @@ class Companion:
         self.bssid = bssid
         self.lastPwr = 0
         self.pin_attempts = 0
-        self.MAC_CHANGE_INTERVAL = 1800  # 30分钟 = 1800秒
+        self.MAC_CHANGE_INTERVAL = 600  # 每10分钟（600秒）重置
         self.last_mac_change_time = time.time()
-        self.MAC_CHANGE_THRESHOLD = 150  # Change MAC every 150 PINs
+        self.MAC_CHANGE_THRESHOLD = 150  # 每150pin重置
         self.used_macs = set()  # Keep track of used MAC addresses
 
     def __init_wpa_supplicant(self):
@@ -746,6 +746,7 @@ class Companion:
         self.retsock.bind(self.res_socket_file)
         # 重置计数器和计时器
         self.pin_attempts = 0
+        current_time = time.time()
         self.last_mac_change_time = current_time
         
 
@@ -757,7 +758,7 @@ class Companion:
         current_time = time.time()
         if current_time - self.last_mac_change_time >= self.MAC_CHANGE_INTERVAL:
             try:
-                print('[*] 30 minutes passed - changing MAC address and reinitializing...')
+                print('[*] Time trigger - changing MAC address and reinitializing...')
                 self.change_mac_address()
                 # 重新初始化wpa_supplicant
                 self.reinitialize()
@@ -766,8 +767,9 @@ class Companion:
                 return False
         
         # Check if we need to change MAC address
-        if self.pin_attempts % self.MAC_CHANGE_THRESHOLD == 0:
+        if self.pin_attempts >= self.MAC_CHANGE_THRESHOLD:
             try:
+                print('[*] Number trigger - changing MAC address and reinitializing...')
                 self.change_mac_address()
                 # Reinitialize wpa_supplicant after MAC change
                 self.reinitialize()
